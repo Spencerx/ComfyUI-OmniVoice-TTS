@@ -29,14 +29,62 @@ try:
     class OmniVoicePatcher(_cmp.ModelPatcher):
         """ModelPatcher subclass with aimdo dynamic VRAM reporting."""
 
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.model.dynamic_vbars = getattr(self.model, "dynamic_vbars", {})
+            self.model.dynamic_pins = getattr(self.model, "dynamic_pins", {})
+            self.register_load_device(self.load_device)
+
         def is_dynamic(self):
             return True
 
-        def _vbar_get(self):
+        def _empty_host_buffer(self):
+            try:
+                import comfy_aimdo.host_buffer
+                return comfy_aimdo.host_buffer.HostBuffer(0, 0, 0)
+            except Exception:
+                class _EmptyHostBuffer:
+                    size = 0
+                return _EmptyHostBuffer()
+
+        def _empty_pin_state(self):
+            return {
+                "weights": (self._empty_host_buffer(), [], [-1], [0], [0], {}),
+                "patches": (self._empty_host_buffer(), [], [-1], [0], [0], {}),
+                "hostbufs_initialized": False,
+                "failed": False,
+                "active": False,
+            }
+
+        def register_load_device(self, device):
+            self.model.dynamic_pins = getattr(self.model, "dynamic_pins", {})
+            if device not in self.model.dynamic_pins:
+                self.model.dynamic_pins[device] = self._empty_pin_state()
+
+        def _vbar_get(self, create=False):
             vbars = getattr(self.model, "dynamic_vbars", {})
-            if vbars:
-                return next(iter(vbars.values()))
-            return None
+            return vbars.get(self.load_device) or next(iter(vbars.values()), None)
+
+        def loaded_size(self):
+            vbar = self._vbar_get()
+            if vbar is not None:
+                return vbar.loaded_size()
+            return getattr(self.model, "model_loaded_weight_memory", 0)
+
+        def loaded_ram_size(self):
+            return 0
+
+        def pinned_memory_size(self):
+            return 0
+
+        def unregister_inactive_pins(self, ram_to_unload, subsets=("weights", "patches")):
+            return 0
+
+        def partially_unload_ram(self, ram_to_unload, subsets=("weights", "patches")):
+            pin_state = self.model.dynamic_pins.get(self.load_device)
+            if pin_state is not None:
+                pin_state["active"] = False
+            return 0
 
     del _cmp
 except ImportError:
@@ -488,6 +536,13 @@ def load_model(
     model = model.to(target_device)
 
     model.eval()
+
+    # Newer ComfyUI DynamicVRAM expects dynamic patchers to expose both
+    # dynamic_vbars and dynamic_pins on the wrapped model.  OmniVoice does
+    # not use ComfyUI's per-weight pin state, but the empty dict keeps the
+    # interface compatible while aimdo VBar residency is attached later.
+    model.dynamic_vbars = getattr(model, "dynamic_vbars", {})
+    model.dynamic_pins = getattr(model, "dynamic_pins", {})
 
     # Apply SageAttention monkey-patch if requested
     if attention == "sage_attention":
