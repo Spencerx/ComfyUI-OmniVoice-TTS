@@ -86,6 +86,55 @@ try:
                 pin_state["active"] = False
             return 0
 
+        def partially_load(self, device_to, extra_memory=0, force_patch_weights=False):
+            device_to = torch.device(device_to)
+            self.register_load_device(device_to)
+            before = self.loaded_size()
+            self.model.to(device_to)
+            self.model.model_loaded_weight_memory = (
+                self.model_size() if self._vbar_get() is None else 0
+            )
+            return max(0, self.loaded_size() - before)
+
+        def partially_unload(self, device_to, memory_to_free=0, force_patch_weights=False):
+            before = self.loaded_size()
+            self.detach()
+            return before
+
+        def detach(self, unpatch_all=True):
+            """Offload OmniVoice without assigning its read-only device property.
+
+            ComfyUI's base ModelPatcher.detach() runs diffusion-model unpatching
+            and assigns ``self.model.device``.  HuggingFace OmniVoice derives
+            device from its parameters and exposes no setter, so move the
+            module directly and reset only the bookkeeping we own.
+            """
+            try:
+                self.model.to(self.offload_device)
+                self.model.model_loaded_weight_memory = 0
+                if hasattr(self.model, "model_offload_buffer_memory"):
+                    self.model.model_offload_buffer_memory = 0
+                if hasattr(self.model, "dynamic_vbars"):
+                    self.model.dynamic_vbars.clear()
+                pin_state = self.model.dynamic_pins.get(self.load_device)
+                if pin_state is not None:
+                    pin_state["active"] = False
+            except Exception:
+                pass
+            clear_cache = globals().get("empty_cache")
+            if callable(clear_cache):
+                try:
+                    clear_cache()
+                except Exception:
+                    pass
+            return self.model
+
+        def current_loaded_device(self):
+            try:
+                return next(self.model.parameters()).device
+            except (StopIteration, AttributeError):
+                return self.offload_device
+
     del _cmp
 except ImportError:
     # ComfyUI not available (testing outside ComfyUI) — fall back to base
