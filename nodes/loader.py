@@ -459,6 +459,66 @@ def transcribe_with_whisper(pipe, audio_np: np.ndarray, sample_rate: int) -> str
     return str(result).strip()
 
 
+def prepare_auto_reference_audio(
+    audio_np: np.ndarray,
+    sample_rate: int,
+    preprocess_prompt: bool,
+) -> np.ndarray:
+    """Match OmniVoice's long-reference trimming before external ASR.
+
+    OmniVoice trims auto-transcribed references longer than 20 seconds to
+    at most 15 seconds. External transcription must use the same shortened
+    waveform; otherwise passing the generated transcript as ``ref_text``
+    makes OmniVoice treat it as user-provided and skip its own trim.
+    """
+    audio = np.asarray(audio_np, dtype=np.float32)
+    if audio.ndim != 1:
+        audio = np.squeeze(audio)
+        if audio.ndim != 1:
+            audio = audio.mean(axis=0)
+
+    if not preprocess_prompt or sample_rate <= 0:
+        return np.ascontiguousarray(audio)
+
+    original_duration = audio.shape[-1] / sample_rate
+    if original_duration <= 20.0:
+        return np.ascontiguousarray(audio)
+
+    max_samples = int(15.0 * sample_rate)
+    try:
+        from omnivoice.utils.audio import trim_long_audio
+
+        trimmed = trim_long_audio(
+            audio[np.newaxis, :],
+            sample_rate,
+            max_duration=15.0,
+            min_duration=3.0,
+            trim_threshold=20.0,
+        )
+        trimmed = np.asarray(trimmed, dtype=np.float32)
+        trimmed = np.squeeze(trimmed)
+        if trimmed.ndim != 1:
+            trimmed = trimmed.mean(axis=0)
+    except Exception as e:
+        logger.warning(
+            f"Could not split long reference at silence ({e}); "
+            "using the first 15 seconds."
+        )
+        trimmed = audio[:max_samples]
+
+    # The upstream helper can return the original waveform when it cannot
+    # find speech. Keep external Whisper and the audio tokenizer bounded.
+    if trimmed.size == 0 or trimmed.shape[-1] > max_samples:
+        trimmed = audio[:max_samples]
+
+    trimmed = np.ascontiguousarray(trimmed, dtype=np.float32)
+    logger.info(
+        f"Auto-transcription reference trimmed from {original_duration:.1f}s "
+        f"to {trimmed.shape[-1] / sample_rate:.1f}s."
+    )
+    return trimmed
+
+
 def _resolve_attn_implementation(attention: str, device: str) -> str | None:
     """Resolve attention implementation for OmniVoice's Qwen3 LLM backbone.
 
